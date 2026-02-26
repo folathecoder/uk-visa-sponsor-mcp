@@ -47,7 +47,9 @@ def _format_sponsor(sponsor: dict) -> str:
             lines.append(f"Visa Routes: {', '.join(routes)}")
 
     if sponsor.get("slug"):
-        lines.append(f"Details: https://uksponsorsearch.co.uk/sponsors/{sponsor['slug']}")
+        lines.append(
+            f"Details: https://uksponsorsearch.co.uk/sponsors/{sponsor['slug']}"
+        )
 
     return "\n".join(lines)
 
@@ -70,6 +72,33 @@ async def check_sponsor(company_name: str) -> str:
         return f"Error checking sponsor: {e.response.status_code}"
 
     if not data.get("found"):
+        stripped = company_name.strip()
+        looks_like_domain = (
+            "." in stripped
+            and " " not in stripped
+            and any(
+                stripped.endswith(tld)
+                for tld in (
+                    ".com",
+                    ".co.uk",
+                    ".uk",
+                    ".org",
+                    ".net",
+                    ".io",
+                    ".ai",
+                    ".co",
+                    ".gov",
+                    ".edu",
+                    ".ac.uk",
+                )
+            )
+        )
+        if looks_like_domain:
+            return (
+                f'No UK visa sponsor found matching "{company_name}". '
+                f"This looks like a domain name. Try searching for the company's registered legal name instead "
+                f'(e.g. extract the company name from the domain and append "Ltd" or "Limited").'
+            )
         return f'No UK visa sponsor found matching "{company_name}". The company may not hold a sponsor licence, or the name may be spelled differently.'
 
     result = [f'Yes, a match was found for "{company_name}":\n']
@@ -106,7 +135,10 @@ async def search_sponsors(
         page: Page number (default 1).
         page_size: Results per page (default 10, max 100).
     """
-    params: dict = {"page": str(page), "pageSize": str(min(page_size, 100))}
+    if page < 1:
+        page = 1
+
+    params: dict = {"page": str(page), "pageSize": str(min(max(page_size, 1), 100))}
     if query:
         params["q"] = query.strip()
     if city:
@@ -142,6 +174,9 @@ async def search_sponsors(
         filter_str = ", ".join(filters) if filters else "the given criteria"
         return f"No sponsors found matching {filter_str}."
 
+    if page > total_pages:
+        return f"Page {page} is out of range. There are only {total_pages} pages ({total:,} total sponsors). Try page=1 to page={total_pages}."
+
     result = [f"Found {total:,} sponsors (page {page} of {total_pages}):\n"]
     for sponsor in sponsors:
         result.append(_format_sponsor(sponsor))
@@ -160,10 +195,14 @@ async def get_sponsor_details(slug: str) -> str:
     Args:
         slug: The sponsor's URL slug (e.g. "deloitte-llp-london"). You can find this from search results.
     """
+    stripped = slug.strip()
+    if not stripped:
+        return 'Please provide a valid sponsor slug (e.g. "deloitte-llp-london"). You can find slugs from search results.'
+
     try:
-        data = await _api_get(f"/api/sponsors/{slug.strip()}")
+        data = await _api_get(f"/api/sponsors/{stripped}")
     except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
+        if e.response.status_code in (404, 308):
             return f'No sponsor found with slug "{slug}". Try using search_sponsors to find the correct slug.'
         return f"Error fetching sponsor: {e.response.status_code}"
 
@@ -186,13 +225,28 @@ async def get_stats() -> str:
     except httpx.HTTPStatusError as e:
         return f"Error fetching stats: {e.response.status_code}"
 
+    total = data.get("totalSponsors", 0)
+    a_rated = data.get("aRated", 0)
+    b_rated = data.get("bRated", 0)
+    recently_added = data.get("recentlyAdded", 0)
+
     result = [
         "## UK Visa Sponsor Register Statistics\n",
-        f"Total Licensed Sponsors: {data.get('totalSponsors', 0):,}",
-        f"A Rated: {data.get('aRated', 0):,}",
-        f"B Rated: {data.get('bRated', 0):,}",
-        f"Recently Added (last 30 days): {data.get('recentlyAdded', 0):,}",
+        f"Total Licensed Sponsors: {total:,}",
+        f"A Rated: {a_rated:,}",
+        f"B Rated: {b_rated:,}",
     ]
+
+    other_rated = total - a_rated - b_rated
+    if other_rated > 0:
+        result.append(f"Other Ratings (e.g. Premium): {other_rated:,}")
+
+    if recently_added > 0 and recently_added < total:
+        result.append(f"Recently Added (last 30 days): {recently_added:,}")
+    elif recently_added >= total:
+        result.append(
+            f"Recently Added (last 30 days): Data unavailable (register may have been recently refreshed)"
+        )
 
     if data.get("lastUpdated"):
         result.append(f"Last Updated: {data['lastUpdated'][:10]}")
